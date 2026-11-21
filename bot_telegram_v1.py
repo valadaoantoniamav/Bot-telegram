@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import secrets
 import sqlite3
@@ -7,16 +8,16 @@ from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
 PORT = int(os.getenv("PORT", "8080"))
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
-KIWIFY_WEBHOOK_TOKEN = os.environ["KIWIFY_WEBHOOK_TOKEN"]
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 CHANNEL_ID_RAW = os.getenv("CHANNEL_ID", "").strip()
 CHANNEL_ID = int(CHANNEL_ID_RAW) if CHANNEL_ID_RAW else None
+WEBHOOK_PATH = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:24]
 
 PAYMENT_LINKS = {
     "7d": "https://pay.kiwify.com.br/nNtYoc4",
@@ -188,6 +189,20 @@ async def setchannel_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "Eu identificarei o ID do canal e farei a configuração."
     )
 
+
+
+async def forwarded_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_TELEGRAM_ID and update.effective_user.id != ADMIN_TELEGRAM_ID:
+        return
+    message = update.message
+    origin = getattr(message, "forward_origin", None)
+    chat = getattr(origin, "chat", None) if origin else None
+    if not chat:
+        return
+    await update.message.reply_text(
+        f"📢 Canal identificado.\n\nID: {chat.id}\n\n"
+        "Agora me diga se este é o canal privado que será usado para os acessos."
+    )
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🆔 Seu Telegram ID: {update.effective_user.id}")
@@ -385,7 +400,7 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
-@app.post("/kiwify/webhook/" + KIWIFY_WEBHOOK_TOKEN)
+@app.post("/kiwify/webhook/" + WEBHOOK_PATH)
 async def kiwify_endpoint(request: Request):
     return await kiwify_webhook(request)
 
@@ -462,3 +477,8 @@ tg_app.add_handler(CommandHandler("ajuda", help_command))
 tg_app.add_handler(CommandHandler("id", id_command))
 tg_app.add_handler(CommandHandler("setchannel", setchannel_command))
 tg_app.add_handler(CallbackQueryHandler(button_handler))
+tg_app.add_handler(MessageHandler(filters.FORWARDED, forwarded_channel_message))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("bot_telegram_v1:app", host="0.0.0.0", port=PORT)
