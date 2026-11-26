@@ -29,7 +29,7 @@ PLAN_TITLE = "📅 ACESSO POR 1 SEMANA"
 WELCOME_MESSAGE = """Olá amigo, seja bem vindo ao PORNOBÃO.
 O acesso ao grupo tem duração de 1 semana, o plano custa apenas R$9,90.
 
-ℹ️ Ao entrar no grupo você terá acesso a +500 mídias após o período, você pode renovar seu acesso quando quiser enviando "/start" aqui mesmo.
+ℹ️ Ao entrar no canal, você terá acesso a +500 mídias. Após o período, você pode renovar seu acesso quando quiser enviando "/start" aqui mesmo.
 
 🔎 Na bio do grupo você pode conferir termos de pesquisa para facilitar sua navegação por algo específico.
 
@@ -136,7 +136,7 @@ def iso_after_days(days):
 
 def plans_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔐 ACESSAR O GRUPO", callback_data="show:plan")]
+        [InlineKeyboardButton("🔐 ACESSAR CANAL", callback_data="show:plan")]
     ])
 
 
@@ -200,7 +200,7 @@ async def renew_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        '💳 Para pagar, envie /start, toque em "ACESSAR O GRUPO" e depois em '
+        '💳 Para pagar, envie /start, toque em "ACESSAR CANAL" e depois em '
         '"EFETUAR PAGAMENTO — R$ 9,90".'
     )
 
@@ -327,11 +327,11 @@ async def send_group_access(telegram_id, order_id, expires_at):
             chat_id=telegram_id,
             text=(
                 "✅ PAGAMENTO CONFIRMADO!\n\n"
-                "🔐 Seu acesso ao grupo está liberado.\n\n"
+                "🔐 Seu acesso ao canal está liberado.\n\n"
                 "👇 Clique abaixo para entrar:"
             ),
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔐 ACESSAR O GRUPO", url=invite_url)]
+                [InlineKeyboardButton("🔐 ACESSAR CANAL", url=invite_url)]
             ]),
         )
     except Exception as exc:
@@ -402,6 +402,17 @@ async def remove_expired_member(telegram_id):
         return False
 
     try:
+        # Never touch channel administrators or the channel owner.
+        # This is an explicit safety guard, independent of Telegram's own
+        # permission checks.
+        member = await tg_app.bot.get_chat_member(
+            chat_id=chat_id,
+            user_id=telegram_id,
+        )
+        if member.status in {"administrator", "creator"}:
+            print(f"Proteção de administrador: usuário {telegram_id} não será removido.")
+            return False
+
         # Ban briefly, then unban: this removes the member while allowing
         # a future valid invite after a renewal.
         await tg_app.bot.ban_chat_member(
@@ -447,7 +458,7 @@ async def expiration_loop():
                         await tg_app.bot.send_message(
                             chat_id=int(row["telegram_id"]),
                             text=(
-                                "⏳ Seu acesso ao grupo expirou.\n\n"
+                                "⏳ Seu acesso ao canal expirou.\n\n"
                                 "Para continuar, envie /start e faça uma nova assinatura."
                             ),
                         )
@@ -524,7 +535,7 @@ async def handle_renewal(payload):
                     "Seu acesso foi estendido por mais 1 semana."
                 ),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔐 ACESSAR O GRUPO", url=invite_url)]
+                    [InlineKeyboardButton("🔐 ACESSAR CANAL", url=invite_url)]
                 ]),
             )
     except Exception as exc:
