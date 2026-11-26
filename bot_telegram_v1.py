@@ -58,6 +58,12 @@ def init_db():
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,
             telegram_id INTEGER NOT NULL,
@@ -70,6 +76,18 @@ def init_db():
             event_type TEXT
         )
     """)
+    # Migrate databases created by older versions of the bot.
+    order_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(orders)").fetchall()
+    }
+    if "expires_at" not in order_columns:
+        conn.execute("ALTER TABLE orders ADD COLUMN expires_at TEXT")
+    if "subscription_id" not in order_columns:
+        conn.execute("ALTER TABLE orders ADD COLUMN subscription_id TEXT")
+    if "event_type" not in order_columns:
+        conn.execute("ALTER TABLE orders ADD COLUMN event_type TEXT")
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_orders_expires_at
         ON orders(expires_at)
@@ -80,6 +98,28 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+
+def get_setting(key):
+    conn = db()
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else None
+
+
+def set_setting(key, value):
+    conn = db()
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def effective_group_chat_id():
+    return GROUP_CHAT_ID or get_setting("group_chat_id")
 
 
 def now_dt():
@@ -251,12 +291,13 @@ def extract_event_date(payload):
 
 
 async def create_access_link(expires_at):
-    if not GROUP_CHAT_ID:
+    chat_id = effective_group_chat_id()
+    if not chat_id:
         return GROUP_INVITE_URL or None
 
     expire_ts = int(datetime.fromisoformat(expires_at).timestamp())
     link = await tg_app.bot.create_chat_invite_link(
-        chat_id=GROUP_CHAT_ID,
+        chat_id=chat_id,
         name="Acesso semanal",
         expire_date=expire_ts,
         member_limit=1,
@@ -355,21 +396,22 @@ def upsert_paid_order(order_id, telegram_id, event_type, subscription_id=None):
 
 
 async def remove_expired_member(telegram_id):
-    if not GROUP_CHAT_ID:
-        print("GROUP_CHAT_ID não configurado; não é possível remover membros automaticamente.")
+    chat_id = effective_group_chat_id()
+    if not chat_id:
+        print("ID do canal ainda não foi identificado; não é possível remover membros automaticamente.")
         return False
 
     try:
         # Ban briefly, then unban: this removes the member while allowing
         # a future valid invite after a renewal.
         await tg_app.bot.ban_chat_member(
-            chat_id=GROUP_CHAT_ID,
+            chat_id=chat_id,
             user_id=telegram_id,
             until_date=int(time.time()) + 60,
             revoke_messages=False,
         )
         await tg_app.bot.unban_chat_member(
-            chat_id=GROUP_CHAT_ID,
+            chat_id=chat_id,
             user_id=telegram_id,
             only_if_banned=True,
         )
@@ -571,11 +613,13 @@ async def handle_refund_or_chargeback(payload):
 
 @app.get("/health")
 async def health():
+    chat_id = effective_group_chat_id()
     return {
         "status": "ok",
         "kiwify_checkout_configured": bool(KIWIFY_CHECKOUT_URL),
-        "group_invite_configured": bool(GROUP_INVITE_URL or GROUP_CHAT_ID),
-        "auto_expiration_configured": bool(GROUP_CHAT_ID),
+        "group_invite_configured": bool(GROUP_INVITE_URL or chat_id),
+        "auto_expiration_configured": bool(chat_id),
+        "telegram_channel_id": chat_id,
         "recurring_subscription_supported": True,
     }
 
@@ -584,6 +628,15 @@ async def health():
 async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, tg_app.bot)
+
+    # A private channel does not expose a public @username. When the bot is
+    # an administrator, Telegram sends channel_post updates to its webhook.
+    # We use the first such update to discover and persist the channel ID.
+    if update.channel_post and update.channel_post.chat:
+        chat_id = str(update.channel_post.chat.id)
+        set_setting("group_chat_id", chat_id)
+        print(f"Canal Telegram identificado automaticamente: {chat_id}")
+
     await tg_app.update_queue.put(update)
     return {"ok": True}
 
@@ -630,8 +683,12 @@ async def kiwify_endpoint(request: Request):
 
 
 async def startup():
-    global expiration_task
+    global expiration_task, GROUP_CHAT_ID
     init_db()
+    persisted_chat_id = get_setting("group_chat_id")
+    if persisted_chat_id and not GROUP_CHAT_ID:
+        GROUP_CHAT_ID = persisted_chat_id
+
     await tg_app.initialize()
     await tg_app.start()
 
