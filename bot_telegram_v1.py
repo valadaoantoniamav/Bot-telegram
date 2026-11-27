@@ -43,8 +43,11 @@ expiration_task = None
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    # Allow concurrent Telegram webhook handlers to wait briefly instead of
+    # failing immediately when SQLite is busy.
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -63,6 +66,18 @@ def init_db():
             value TEXT NOT NULL
         )
     """)
+    # Migrate pending checkout databases created by an older version that
+    # already had a required plan column.
+    pending_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(pending_checkouts)").fetchall()
+    }
+    if "plan" not in pending_columns:
+        conn.execute(
+            "ALTER TABLE pending_checkouts "
+            "ADD COLUMN plan TEXT NOT NULL DEFAULT 'weekly'"
+        )
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,
@@ -151,8 +166,9 @@ def build_checkout_url(telegram_id):
     token = secrets.token_urlsafe(18)
     conn = db()
     conn.execute(
-        "INSERT INTO pending_checkouts(token, telegram_id, created_at) VALUES (?, ?, ?)",
-        (token, telegram_id, now_iso()),
+        "INSERT INTO pending_checkouts(token, telegram_id, created_at, plan) "
+        "VALUES (?, ?, ?, ?)",
+        (token, telegram_id, now_iso(), PLAN_ID),
     )
     conn.commit()
     conn.close()
